@@ -6,7 +6,7 @@ use volatile::Volatile;
 lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
         column_position: 0,
-        color_code: ColorCode::new(Color::Yellow, Color::Black),
+        color_code: ColorCode::new(Color::White, Color::Black),
         buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
     });
 }
@@ -38,7 +38,6 @@ struct ScreenChar {
 
 const BUFFER_HEIGHT: usize = 25;
 const BUFFER_WIDTH: usize = 80;
-const PROMPT: &str = "maji >> ";
 
 #[repr(transparent)]
 struct Buffer {
@@ -79,7 +78,7 @@ impl Writer {
         }
         self.clear_row(BUFFER_HEIGHT - 1);
         self.column_position = 0;
-        self.write_string(PROMPT);
+        // no prompt here — shell.prompt() handles it
     }
 
     pub fn draw_status_bar(&mut self) {
@@ -90,7 +89,7 @@ impl Writer {
                 color_code: status_color,
             });
         }
-        let title = " MAJI OS | RESOURCE-BASED KERNEL ";
+        let title = " OpenMaji ";
         let start_x = (BUFFER_WIDTH / 2) - (title.len() / 2);
         for (i, byte) in title.bytes().enumerate() {
             self.buffer.chars[0][start_x + i].write(ScreenChar {
@@ -101,21 +100,25 @@ impl Writer {
     }
 
     fn clear_row(&mut self, row: usize) {
-        let blank = ScreenChar { ascii_character: b' ', color_code: self.color_code };
+        let blank = ScreenChar {
+            ascii_character: b' ',
+            color_code: self.color_code,
+        };
         for col in 0..BUFFER_WIDTH {
             self.buffer.chars[row][col].write(blank);
         }
     }
 
     pub fn clear_screen(&mut self) {
-        for row in 0..BUFFER_HEIGHT { self.clear_row(row); }
+        for row in 0..BUFFER_HEIGHT {
+            self.clear_row(row);
+        }
         self.draw_status_bar();
         self.column_position = 0;
-        self.write_string(PROMPT);
     }
 
     pub fn backspace(&mut self) {
-        if self.column_position > PROMPT.len() {
+        if self.column_position > 0 {
             self.column_position -= 1;
             let row = BUFFER_HEIGHT - 1;
             self.buffer.chars[row][self.column_position].write(ScreenChar {
@@ -126,7 +129,17 @@ impl Writer {
     }
 
     pub fn write_string(&mut self, s: &str) {
-        for byte in s.bytes() { self.write_byte(byte); }
+        for byte in s.bytes() {
+            self.write_byte(byte);
+        }
+    }
+
+    pub fn set_color(&mut self, fg: Color, bg: Color) {
+        self.color_code = ColorCode::new(fg, bg);
+    }
+
+    pub fn reset_color(&mut self) {
+        self.color_code = ColorCode::new(Color::White, Color::Black);
     }
 }
 
@@ -137,6 +150,8 @@ impl fmt::Write for Writer {
     }
 }
 
+// ── Public free functions ─────────────────────────────────────────────────────
+
 pub fn clear_screen() {
     x86_64::instructions::interrupts::without_interrupts(|| {
         WRITER.lock().clear_screen();
@@ -146,6 +161,18 @@ pub fn clear_screen() {
 pub fn backspace() {
     x86_64::instructions::interrupts::without_interrupts(|| {
         WRITER.lock().backspace();
+    });
+}
+
+pub fn set_color(fg: Color, bg: Color) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        WRITER.lock().set_color(fg, bg);
+    });
+}
+
+pub fn reset_color() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        WRITER.lock().reset_color();
     });
 }
 
