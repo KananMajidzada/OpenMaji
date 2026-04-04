@@ -1,3 +1,4 @@
+pub mod disk;
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -6,14 +7,10 @@ use alloc::{
 use spin::Mutex;
 use lazy_static::lazy_static;
 
-
-
 const MAX_INODES: usize = 256;
 const MAX_FILE_SIZE: usize = 4096;
 
-
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InodeKind {
     File,
     Directory,
@@ -25,19 +22,16 @@ pub struct Inode {
     pub kind:     InodeKind,
     pub name:     String,
     pub data:     Vec<u8>,
-    pub children: BTreeMap<String, usize>, // name → inode id (dirs only)
-    pub parent:   usize,                   // parent inode id
+    pub children: BTreeMap<String, usize>, 
+    pub parent:   usize,                  
+}
+pub struct OpenMajiFs {
+    pub inodes: Vec<Option<Inode>>,  
+    pub cwd:    usize,               
 }
 
 
-
-pub struct MajiFs {
-    inodes:  Vec<Option<Inode>>,
-    next_id: usize,
-    cwd:     usize,
-}
-
-impl MajiFs {
+impl OpenMajiFs {
     pub fn new() -> Self {
         let mut inodes: Vec<Option<Inode>> = (0..MAX_INODES).map(|_| None).collect();
 
@@ -48,17 +42,18 @@ impl MajiFs {
             name:     String::from("/"),
             data:     Vec::new(),
             children: BTreeMap::new(),
-            parent:   0, // root's parent is itself
+            parent:   0, 
         });
 
-        MajiFs { inodes, next_id: 1, cwd: 0 }
+        OpenMajiFs { inodes, cwd: 0 }
     }
 
    
 
-    fn alloc_inode(&mut self, kind: InodeKind, name: &str, parent: usize) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
+    fn alloc_inode(&mut self, kind: InodeKind, name: &str, parent: usize) -> Result<usize, &'static str> {
+        let id = self.inodes.iter().position(|slot| slot.is_none())
+            .ok_or("FS Error: No free inodes available")?;
+        
         self.inodes[id] = Some(Inode {
             id,
             kind,
@@ -67,147 +62,172 @@ impl MajiFs {
             children: BTreeMap::new(),
             parent,
         });
-        id
+        Ok(id)
     }
 
-    fn cwd_ref(&self) -> &Inode {
-        self.inodes[self.cwd].as_ref().unwrap()
+    fn get_inode(&self, id: usize) -> &Inode {
+        self.inodes[id].as_ref().expect("FS Error: Inode corruption")
     }
 
-    fn cwd_mut(&mut self) -> &mut Inode {
-        self.inodes[self.cwd].as_mut().unwrap()
+    fn get_inode_mut(&mut self, id: usize) -> &mut Inode {
+        self.inodes[id].as_mut().expect("FS Error: Inode corruption")
     }
 
-    
-
+    // --- Public API ---
 
     pub fn cwd_name(&self) -> &str {
-        &self.cwd_ref().name
+        &self.get_inode(self.cwd).name
     }
 
-    
     pub fn cwd_path(&self) -> String {
-        let mut path = Vec::new();
+        if self.cwd == 0 { return String::from("/"); }
+        let mut components = Vec::new();
         let mut current = self.cwd;
-        loop {
-            let inode = self.inodes[current].as_ref().unwrap();
-            if current == 0 {
-                break;
-            }
-            path.push(inode.name.clone());
-            current = inode.parent;
+        while current != 0 {
+            let node = self.get_inode(current);
+            components.push(node.name.clone());
+            current = node.parent;
         }
-        if path.is_empty() {
-            return String::from("/");
+        let mut path = String::new();
+        for comp in components.iter().rev() {
+            path.push('/');
+            path.push_str(comp);
         }
-        let mut result = String::new();
-        for part in path.iter().rev() {
-            result.push('/');
-            result.push_str(part);
-        }
-        result
+        path
     }
 
-   
     pub fn list(&self) -> Vec<(String, bool)> {
-        self.cwd_ref()
+        self.get_inode(self.cwd)
             .children
             .iter()
             .map(|(name, &id)| {
-                let is_dir = matches!(
-                    self.inodes[id].as_ref().unwrap().kind,
-                    InodeKind::Directory
-                );
+                let is_dir = matches!(self.get_inode(id).kind, InodeKind::Directory);
                 (name.clone(), is_dir)
             })
             .collect()
     }
 
-   
     pub fn mkdir(&mut self, name: &str) -> Result<(), &'static str> {
-        if name.is_empty() { return Err("name cannot be empty"); }
-        if self.cwd_ref().children.contains_key(name) {
-            return Err("already exists");
-        }
-        let parent = self.cwd;
-        let id = self.alloc_inode(InodeKind::Directory, name, parent);
-        self.cwd_mut().children.insert(name.to_string(), id);
+        if name.is_empty() { return Err("Name cannot be empty"); }
+        if self.get_inode(self.cwd).children.contains_key(name) { return Err("Entry already exists"); }
+        let id = self.alloc_inode(InodeKind::Directory, name, self.cwd)?;
+        self.get_inode_mut(self.cwd).children.insert(name.to_string(), id);
         Ok(())
     }
 
-   
     pub fn create(&mut self, name: &str) -> Result<(), &'static str> {
-        if name.is_empty() { return Err("name cannot be empty"); }
-        if self.cwd_ref().children.contains_key(name) {
-            return Err("already exists");
-        }
-        let parent = self.cwd;
-        let id = self.alloc_inode(InodeKind::File, name, parent);
-        self.cwd_mut().children.insert(name.to_string(), id);
+        if name.is_empty() { return Err("Name cannot be empty"); }
+        if self.get_inode(self.cwd).children.contains_key(name) { return Err("Entry already exists"); }
+        let id = self.alloc_inode(InodeKind::File, name, self.cwd)?;
+        self.get_inode_mut(self.cwd).children.insert(name.to_string(), id);
         Ok(())
     }
 
-  
     pub fn write(&mut self, name: &str, content: &[u8]) -> Result<(), &'static str> {
-        if content.len() > MAX_FILE_SIZE { return Err("file too large"); }
-        let id = *self.cwd_ref().children.get(name).ok_or("not found")?;
-        match self.inodes[id].as_ref().unwrap().kind {
-            InodeKind::Directory => return Err("is a directory"),
-            InodeKind::File => {}
-        }
-        self.inodes[id].as_mut().unwrap().data = content.to_vec();
+        if content.len() > MAX_FILE_SIZE { return Err("File size exceeds limit"); }
+        let id = *self.get_inode(self.cwd).children.get(name).ok_or("File not found")?;
+        let node = self.get_inode_mut(id);
+        if node.kind == InodeKind::Directory { return Err("Cannot write to a directory"); }
+        node.data = content.to_vec();
         Ok(())
     }
 
+    // Changed back to returning &[u8] to fix the shell.rs mismatched types errors
     pub fn read(&self, name: &str) -> Result<&[u8], &'static str> {
-        let id = *self.cwd_ref().children.get(name).ok_or("not found")?;
-        match self.inodes[id].as_ref().unwrap().kind {
-            InodeKind::Directory => Err("is a directory"),
-            InodeKind::File => Ok(&self.inodes[id].as_ref().unwrap().data),
-        }
+        let id = *self.get_inode(self.cwd).children.get(name).ok_or("File not found")?;
+        let node = self.get_inode(id);
+        if node.kind == InodeKind::Directory { return Err("Is a directory"); }
+        Ok(&node.data)
     }
 
-   
+    pub fn append(&mut self, name: &str, content: &[u8]) -> Result<(), &'static str> {
+        let mut data = self.read(name)?.to_vec();
+        if data.len() + content.len() > MAX_FILE_SIZE { return Err("File too large"); }
+        data.extend_from_slice(content);
+        self.write(name, &data)
+    }
+
+    pub fn file_size(&self, name: &str) -> Result<usize, &'static str> {
+        let id = *self.get_inode(self.cwd).children.get(name).ok_or("Not found")?;
+        Ok(self.get_inode(id).data.len())
+    }
+
     pub fn remove(&mut self, name: &str) -> Result<(), &'static str> {
-        let id = *self.cwd_ref().children.get(name).ok_or("not found")?;
-        let inode = self.inodes[id].as_ref().unwrap();
-        if let InodeKind::Directory = inode.kind {
-            if !inode.children.is_empty() {
-                return Err("directory not empty");
-            }
+        let id = *self.get_inode(self.cwd).children.get(name).ok_or("Not found")?;
+        if self.get_inode(id).kind == InodeKind::Directory && !self.get_inode(id).children.is_empty() {
+            return Err("Directory not empty");
         }
-        self.cwd_mut().children.remove(name);
+        self.get_inode_mut(self.cwd).children.remove(name);
         self.inodes[id] = None;
         Ok(())
     }
 
-   
+    pub fn remove_recursive(&mut self, name: &str) -> Result<(), &'static str> {
+        let id = *self.get_inode(self.cwd).children.get(name).ok_or("Not found")?;
+        self.recursive_delete_helper(id);
+        self.get_inode_mut(self.cwd).children.remove(name);
+        Ok(())
+    }
+
+    fn recursive_delete_helper(&mut self, id: usize) {
+        let child_ids: Vec<usize> = self.get_inode(id).children.values().cloned().collect();
+        for cid in child_ids {
+            self.recursive_delete_helper(cid);
+        }
+        self.inodes[id] = None;
+    }
+
     pub fn cd(&mut self, name: &str) -> Result<(), &'static str> {
         if name == ".." {
-            let parent = self.cwd_ref().parent;
-            self.cwd = parent;
+            self.cwd = self.get_inode(self.cwd).parent;
             return Ok(());
         }
         if name == "/" {
             self.cwd = 0;
             return Ok(());
         }
-        let id = *self.cwd_ref().children.get(name).ok_or("not found")?;
-        match self.inodes[id].as_ref().unwrap().kind {
-            InodeKind::Directory => { self.cwd = id; Ok(()) }
-            InodeKind::File      => Err("not a directory"),
-        }
+        let id = *self.get_inode(self.cwd).children.get(name).ok_or("Not found")?;
+        if self.get_inode(id).kind != InodeKind::Directory { return Err("Not a directory"); }
+        self.cwd = id;
+        Ok(())
     }
 
-    
-    pub fn file_size(&self, name: &str) -> Result<usize, &'static str> {
-        let id = *self.cwd_ref().children.get(name).ok_or("not found")?;
-        Ok(self.inodes[id].as_ref().unwrap().data.len())
+    pub fn copy(&mut self, src: &str, dst: &str) -> Result<(), &'static str> {
+        let data = self.read(src)?.to_vec();
+        self.create(dst)?;
+        self.write(dst, &data)
+    }
+
+    pub fn rename(&mut self, src: &str, dst: &str) -> Result<(), &'static str> {
+        self.copy(src, dst)?;
+        self.remove(src)
+    }
+
+    // Added find method for the shell
+    pub fn find(&self, name: &str) -> Vec<String> {
+        self.get_inode(self.cwd)
+            .children
+            .keys()
+            .filter(|k| k.contains(name))
+            .cloned()
+            .collect()
+    }
+
+    pub fn stats(&self) -> (usize, usize, usize, usize, usize) {
+        let used = self.inodes.iter().filter(|i| i.is_some()).count();
+        let mut files = 0;
+        let mut dirs = 0;
+        let mut total_size = 0;
+        for node in self.inodes.iter().flatten() {
+            match node.kind {
+                InodeKind::File => { files += 1; total_size += node.data.len(); }
+                InodeKind::Directory => dirs += 1,
+            }
+        }
+        (used, MAX_INODES, files, dirs, total_size)
     }
 }
 
-
-
 lazy_static! {
-    pub static ref MAJIFS: Mutex<MajiFs> = Mutex::new(MajiFs::new());
+    pub static ref OPENMAJIFS: Mutex<OpenMajiFs> = Mutex::new(OpenMajiFs::new());
 }

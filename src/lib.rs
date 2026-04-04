@@ -19,6 +19,8 @@ pub mod serial;
 pub mod task;
 pub mod vga_buffer;
 pub mod shell;
+pub mod process;
+pub mod drivers;
 
 pub fn init() {
     gdt::init();
