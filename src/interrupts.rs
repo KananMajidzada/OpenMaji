@@ -80,6 +80,10 @@ extern "x86-interrupt" fn double_fault_handler(
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     TICK_COUNT.fetch_add(1, Ordering::Relaxed);
 
+    
+    if TICK_COUNT.load(Ordering::Relaxed) % 10 == 0 {
+        crate::process::scheduler::try_switch();
+    }
 
     unsafe {
         PICS.lock()
